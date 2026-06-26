@@ -444,6 +444,28 @@ class ChatCompletionsTransport(ProviderTransport):
     def api_mode(self) -> str:
         return "chat_completions"
 
+    @staticmethod
+    def _apply_session_headers(api_kwargs: dict[str, Any], session_id: Any) -> None:
+        from typing import Dict
+        cache_scope_id = str(session_id or "").strip()
+        if not cache_scope_id:
+            return
+
+        existing_extra_headers = api_kwargs.get("extra_headers")
+        merged_extra_headers: Dict[str, str] = {}
+        if isinstance(existing_extra_headers, dict):
+            merged_extra_headers.update(
+                {
+                    str(key): str(value)
+                    for key, value in existing_extra_headers.items()
+                    if key and value is not None
+                }
+            )
+
+        merged_extra_headers["Session-Id"] = cache_scope_id
+        merged_extra_headers["X-Session-Id"] = cache_scope_id
+        api_kwargs["extra_headers"] = merged_extra_headers
+
     def convert_messages(self, messages: list[dict[str, Any]], **kwargs) -> list[dict[str, Any]]:
         """Strip internal fields that strict chat-completions providers reject (HTTP 400/422).
 
@@ -544,6 +566,7 @@ class ChatCompletionsTransport(ProviderTransport):
             api_kwargs["extra_body"] = extra_body
         if params.get("request_overrides"):
             api_kwargs.update(params["request_overrides"])
+        self._apply_session_headers(api_kwargs, params.get("session_id"))
         return _finish_kwargs(
             api_kwargs, sanitized, params,
             supports_prompt_cache_key=bool(params.get("supports_prompt_cache_key")) or _is_openai_api_base_url(base_url),
@@ -594,6 +617,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 extra_body = {k: v for k, v in extra_body.items() if k in ("thinking_config", "thinkingConfig")}
             if extra_body:
                 api_kwargs["extra_body"] = extra_body
+        self._apply_session_headers(api_kwargs, params.get("session_id"))
         return _finish_kwargs(
             api_kwargs, sanitized, params, supports_prompt_cache_key=bool(getattr(profile, "supports_prompt_cache_key", False)),
         )
