@@ -214,6 +214,27 @@ class ChatCompletionsTransport(ProviderTransport):
     def api_mode(self) -> str:
         return "chat_completions"
 
+    @staticmethod
+    def _apply_session_headers(api_kwargs: dict[str, Any], session_id: Any) -> None:
+        cache_scope_id = str(session_id or "").strip()
+        if not cache_scope_id:
+            return
+
+        existing_extra_headers = api_kwargs.get("extra_headers")
+        merged_extra_headers: Dict[str, str] = {}
+        if isinstance(existing_extra_headers, dict):
+            merged_extra_headers.update(
+                {
+                    str(key): str(value)
+                    for key, value in existing_extra_headers.items()
+                    if key and value is not None
+                }
+            )
+
+        merged_extra_headers["Session-Id"] = cache_scope_id
+        merged_extra_headers["X-Session-Id"] = cache_scope_id
+        api_kwargs["extra_headers"] = merged_extra_headers
+
     def convert_messages(
         self, messages: list[dict[str, Any]], **kwargs
     ) -> list[dict[str, Any]]:
@@ -593,6 +614,7 @@ class ChatCompletionsTransport(ProviderTransport):
             or _is_openai_api_base_url(params.get("base_url")),
             session_id=params.get("session_id"),
         )
+        self._apply_session_headers(api_kwargs, params.get("session_id"))
 
         return api_kwargs
 
@@ -743,6 +765,7 @@ class ChatCompletionsTransport(ProviderTransport):
             supports_prompt_cache_key=bool(profile.supports_prompt_cache_key),
             session_id=params.get("session_id"),
         )
+        self._apply_session_headers(api_kwargs, params.get("session_id"))
 
         return api_kwargs
 
