@@ -171,6 +171,33 @@ class TestChatCompletionsBuildKwargs:
         assert kw["messages"][0]["content"] == "Hello"
         assert kw["timeout"] == 30.0
 
+    def test_session_id_becomes_http_headers(self, transport):
+        msgs = [{"role": "user", "content": "Hello"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o",
+            messages=msgs,
+            session_id="hermes-session-1",
+            request_overrides={"extra_headers": {"X-Existing": "kept"}},
+        )
+        assert kw["extra_headers"]["X-Existing"] == "kept"
+        assert kw["extra_headers"]["Session-Id"] == "hermes-session-1"
+        assert kw["extra_headers"]["X-Session-Id"] == "hermes-session-1"
+
+    def test_profile_path_session_id_becomes_http_headers(self, transport):
+        from providers import get_provider_profile
+
+        msgs = [{"role": "user", "content": "Hello"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o",
+            messages=msgs,
+            provider_profile=get_provider_profile("openai"),
+            session_id="hermes-session-2",
+            request_overrides={"extra_headers": {"X-Existing": "kept"}},
+        )
+        assert kw["extra_headers"]["X-Existing"] == "kept"
+        assert kw["extra_headers"]["Session-Id"] == "hermes-session-2"
+        assert kw["extra_headers"]["X-Session-Id"] == "hermes-session-2"
+
     def test_developer_role_swap(self, transport):
         msgs = [{"role": "system", "content": "You are helpful"}, {"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(model="gpt-5.4", messages=msgs, model_lower="gpt-5.4")
