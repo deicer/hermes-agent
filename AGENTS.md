@@ -1371,9 +1371,7 @@ source files configuration belongs in the JS (vitest) test suite, not in `tests/
 
 ### Obsidian Project Sync
 
-After any change to code, infrastructure, configuration, or process, you MUST
-update the project in Obsidian — at minimum `Проект.md` and `Лог работы.md`
-for the relevant project.
+After any change to code, infrastructure, configuration, or process, you MUST update the project in Obsidian — at minimum Проект.md and Лог работы.md for the relevant project.
 
 ### Don't write change-detector tests
 
