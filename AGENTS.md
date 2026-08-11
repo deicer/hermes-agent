@@ -165,5 +165,15 @@ Every former god file is a **facade** (public entry points + the names other pac
 | `pm/`, `pyproject.toml` | `pm/AGENTS.md` | pinning policy, PM-owned environments, plugin quarantine |
 | `hermes_platform/` | `hermes_platform/AGENTS.md` | host facts, resolvers |
 
-Long-form background: `website/docs/developer-guide/`. Workflow rules (PR/issue/review/salvage
-process) live in the `hermes-agent-dev` skill, not here.
+<<<<<<< HEAD
+| `hermes_platform/` | `hermes_platform/AGENTS.md` | host facts, resolvers |
+|
+
+Long-form background lives in `website/docs/developer-guide/` (agent-loop, prompt-assembly,
+context-compression-and-caching, gateway-internals, tools-runtime, plugins/, cron-internals,
+session-storage, ...). Workflow rules (PR/issue/review/salvage process) live in the
+`hermes-agent-dev` skill, not here.
+
+### Obsidian Project Sync
+
+After any change to code, infrastructure, configuration, or process, you MUST update the project in Obsidian — at minimum Проект.md and Лог работы.md for the relevant project.
