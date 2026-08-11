@@ -463,3 +463,7 @@ Long-form background lives in `website/docs/developer-guide/` (agent-loop, promp
 context-compression-and-caching, gateway-internals, tools-runtime, plugins/, cron-internals,
 session-storage, ...). Workflow rules (PR/issue/review/salvage process) live in the
 `hermes-agent-dev` skill, not here.
+
+### Obsidian Project Sync
+
+After any change to code, infrastructure, configuration, or process, you MUST update the project in Obsidian — at minimum Проект.md and Лог работы.md for the relevant project.
