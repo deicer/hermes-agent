@@ -1159,6 +1159,281 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         errors = invalid.json()["detail"]["errors"]
         assert [e["index"] for e in errors] == [0] and errors[0]["error"]
 
+        resp = self.client.patch("/api/sessions/arch-me", json={"archived": False})
+        assert resp.status_code == 200
+        restored = self.client.get("/api/sessions").json()
+        assert any(s["id"] == "arch-me" for s in restored["sessions"])
+
+    def test_patch_session_without_fields_is_400(self):
+        """An existing session + empty body is a bad request, not a 404."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="no-fields", source="cli")
+        finally:
+            db.close()
+
+        resp = self.client.patch("/api/sessions/no-fields", json={})
+        assert resp.status_code == 400
+
+    def test_patch_session_pins_and_exempts_from_auto_archive(self):
+        """PATCH pinned=true sets the keep flag; a pinned stale session is
+        spared by the auto-archive sweep while an unpinned one is hidden."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        old = _time.time() - 30 * 86400
+        db = SessionDB()
+        try:
+            for sid in ("keep-me", "drop-me"):
+                db.create_session(session_id=sid, source="cli")
+                db.append_message(session_id=sid, role="user", content="hi")
+                db._conn.execute(
+                    "UPDATE sessions SET started_at = ? WHERE id = ?", (old, sid)
+                )
+                db._conn.execute(
+                    "UPDATE messages SET timestamp = ? WHERE session_id = ?", (old, sid)
+                )
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.patch("/api/sessions/keep-me", json={"pinned": True})
+        assert resp.status_code == 200
+        assert resp.json()["pinned"] is True
+
+        db = SessionDB()
+        try:
+            archived = db.archive_stale_sessions(3)
+        finally:
+            db.close()
+
+        assert archived == 1
+        listed = self.client.get("/api/sessions").json()["sessions"]
+        ids = {s["id"] for s in listed}
+        assert "keep-me" in ids  # pinned -> spared
+        assert "drop-me" not in ids  # unpinned + stale -> archived
+
+    def test_list_triggers_config_gated_auto_archive(self):
+        """With sessions.auto_archive on, listing sessions opportunistically
+        sweeps stale ones (the Desktop `hermes serve` code path)."""
+        import time as _time
+
+        import hermes_cli.web_server as ws
+        from hermes_state import SessionDB
+
+        old = _time.time() - 30 * 86400
+        db = SessionDB()
+        try:
+            db.create_session(session_id="stale-serve", source="cli")
+            db.append_message(session_id="stale-serve", role="user", content="hi")
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?", (old, "stale-serve")
+            )
+            db._conn.execute(
+                "UPDATE messages SET timestamp = ? WHERE session_id = ?",
+                (old, "stale-serve"),
+            )
+            db._conn.commit()
+        finally:
+            db.close()
+
+        # Reset the in-process throttle so the trigger actually evaluates config.
+        ws._last_auto_archive_check.clear()
+
+        # The helper imports load_config lazily from hermes_cli.config; patch there.
+        cfg = {"sessions": {"auto_archive": True, "auto_archive_days": 3, "min_interval_hours": 0}}
+        try:
+            with patch("hermes_cli.config.load_config", return_value=cfg):
+                listed = self.client.get("/api/sessions").json()["sessions"]
+        finally:
+            ws._last_auto_archive_check.clear()
+
+        assert all(s["id"] != "stale-serve" for s in listed)
+
+    def test_archive_session_routes_to_owning_profile_db(self):
+        """PATCH archived with ``profile`` opens the owning profile's state.db.
+
+        Same #44117 failure mode as delete: without the profile in the body
+        the lookup hits the serving process's own db and 404s, even though
+        the row exists in the owning profile's db.
+        """
+        from hermes_constants import get_hermes_home
+        from hermes_state import SessionDB
+
+        profile_home = get_hermes_home() / "profiles" / "worker-beta"
+        profile_home.mkdir(parents=True)
+        pdb = SessionDB(db_path=profile_home / "state.db")
+        try:
+            pdb.create_session(session_id="profile-archived", source="cli")
+        finally:
+            pdb.close()
+
+        resp = self.client.patch(
+            "/api/sessions/profile-archived", json={"archived": True}
+        )
+        assert resp.status_code == 404
+
+        resp = self.client.patch(
+            "/api/sessions/profile-archived",
+            json={"archived": True, "profile": "worker-beta"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["archived"] is True
+
+        pdb = SessionDB(db_path=profile_home / "state.db")
+        try:
+            row = pdb.get_session("profile-archived")
+            assert row is not None and bool(row["archived"])
+        finally:
+            pdb.close()
+
+    def test_profiles_sessions_tags_default_profile(self):
+        """The cross-profile aggregator returns the default profile's rows
+        tagged profile="default" (single-profile parity with /api/sessions)."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="agg-me", source="cli")
+            db.append_message(session_id="agg-me", role="user", content="hi")
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/profiles/sessions?limit=20&min_messages=0")
+        assert resp.status_code == 200
+        data = resp.json()
+        row = next(s for s in data["sessions"] if s["id"] == "agg-me")
+        assert row["profile"] == "default"
+        assert row["is_default_profile"] is True
+        assert isinstance(data.get("errors"), list)
+
+    def test_profiles_sessions_rejects_unknown_archived_value(self):
+        resp = self.client.get("/api/profiles/sessions?archived=bogus")
+        assert resp.status_code == 400
+
+    def test_profiles_sessions_sidebar_batches_three_slices(self):
+        """The batched sidebar endpoint returns recents/cron/messaging in one
+        pass, each source-scoped by the caller-supplied excludes, so the desktop
+        stops reopening every profile DB three times per refresh."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            for sid, src in (
+                ("sb-desktop", "desktop"),
+                ("sb-cron", "cron"),
+                ("sb-telegram", "telegram"),
+            ):
+                db.create_session(session_id=sid, source=src)
+                db.append_message(session_id=sid, role="user", content="hi")
+        finally:
+            db.close()
+
+        resp = self.client.get(
+            "/api/profiles/sessions/sidebar"
+            "?recents_profile=all&recents_limit=20&recents_exclude=cron,telegram"
+            "&cron_limit=50&messaging_limit=100"
+            "&messaging_exclude=cron,cli,codex,desktop,gateway,local,tui"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        recents_ids = {s["id"] for s in data["recents"]["sessions"]}
+        cron_ids = {s["id"] for s in data["cron"]["sessions"]}
+        messaging_ids = {s["id"] for s in data["messaging"]["sessions"]}
+
+        # Each session lands only in its own slice.
+        assert "sb-desktop" in recents_ids
+        assert "sb-desktop" not in cron_ids and "sb-desktop" not in messaging_ids
+        assert "sb-cron" in cron_ids
+        assert "sb-cron" not in recents_ids and "sb-cron" not in messaging_ids
+        assert "sb-telegram" in messaging_ids
+        assert "sb-telegram" not in recents_ids and "sb-telegram" not in cron_ids
+
+        # Rows carry profile tagging like /api/profiles/sessions.
+        row = next(s for s in data["recents"]["sessions"] if s["id"] == "sb-desktop")
+        assert row["profile"] == "default"
+        assert row["is_default_profile"] is True
+        assert isinstance(data.get("errors"), list)
+        assert data["recents"]["total"] >= 1
+
+    def test_sessions_endpoint_reads_requested_profile(self):
+        """The machine dashboard's global profile switcher must retarget
+        the Sessions page, not just config/skills/model pages."""
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+
+        default_db = SessionDB()
+        try:
+            default_db.create_session(session_id="default-only", source="cli")
+            default_db.append_message("default-only", role="user", content="default")
+        finally:
+            default_db.close()
+
+        worker_db = SessionDB(db_path=worker_home / "state.db")
+        try:
+            worker_db.create_session(session_id="worker-only", source="cli")
+            worker_db.append_message("worker-only", role="user", content="worker")
+        finally:
+            worker_db.close()
+
+        resp = self.client.get("/api/sessions?profile=worker&limit=20&min_messages=0")
+        assert resp.status_code == 200
+        data = resp.json()
+        ids = {s["id"] for s in data["sessions"]}
+        assert "worker-only" in ids
+        assert "default-only" not in ids
+        row = next(s for s in data["sessions"] if s["id"] == "worker-only")
+        assert row["profile"] == "worker"
+        assert row["is_default_profile"] is False
+
+        stats = self.client.get("/api/sessions/stats?profile=worker").json()
+        assert stats["total"] == 1
+        assert stats["messages"] == 1
+
+        messages = self.client.get("/api/sessions/worker-only/messages?profile=worker").json()
+        assert [m["content"] for m in messages["messages"]] == ["worker"]
+
+    def test_latest_descendant_reads_requested_profile(self):
+        """Chat resume must resolve compression tips in the chat profile DB."""
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+
+        default_db = SessionDB()
+        try:
+            default_db.create_session(session_id="shared-root", source="cli")
+        finally:
+            default_db.close()
+
+        worker_db = SessionDB(db_path=worker_home / "state.db")
+        try:
+            worker_db.create_session(session_id="shared-root", source="cli")
+            worker_db.create_session(
+                session_id="worker-tip",
+                source="cli",
+                parent_session_id="shared-root",
+            )
+        finally:
+            worker_db.close()
+
+        default_resp = self.client.get("/api/sessions/shared-root/latest-descendant")
+        assert default_resp.status_code == 200
+        assert default_resp.json()["session_id"] == "shared-root"
+
+        worker_resp = self.client.get(
+            "/api/sessions/shared-root/latest-descendant?profile=worker"
+        )
+        assert worker_resp.status_code == 200
+        assert worker_resp.json()["session_id"] == "worker-tip"
 
     def test_latest_descendant_survives_parent_cycle(self):
         """Regression for the #39140 CTE salvage: a corrupted parent chain
