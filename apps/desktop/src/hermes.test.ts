@@ -28,6 +28,7 @@ import {
   resetSidebarBatchCapability,
   setApiRequestConnection,
   setApiRequestProfile,
+  setSessionArchived,
   setSttLease,
   speakText,
   transcribeAudio,
@@ -756,7 +757,7 @@ describe('Hermes REST helpers', () => {
     )
   })
 
-  it('scopes custom endpoint reads to the requested settings profile', async () => {
+it('scopes custom endpoint reads to the requested settings profile', async () => {
     await getCustomEndpoints('content-studio')
 
     expect(api).toHaveBeenCalledWith(
@@ -764,6 +765,47 @@ describe('Hermes REST helpers', () => {
         path: '/api/providers/custom-endpoints',
         profile: 'content-studio',
         priority: 'foreground'
+      })
+    )
+  })
+
+  // The owning profile must reach the SERVER as ?profile=, not just Electron's
+  // backend router: the serving process can be scoped to a different profile
+  // than the desktop believes (sticky active_profile honored on a legacy
+  // launch), so without it the delete 404s against the wrong state.db (#44117).
+  it('passes the owning profile to the server when deleting a session', async () => {
+    await deleteSession('sess-1', 'default')
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'DELETE',
+        path: '/api/sessions/sess-1?profile=default',
+        profile: 'default'
+      })
+    )
+  })
+
+  it('omits the profile param when deleting without an owning profile', async () => {
+    await deleteSession('sess-1')
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'DELETE',
+        path: '/api/sessions/sess-1'
+      })
+    )
+    expect(api.mock.calls[0][0]).not.toHaveProperty('profile')
+  })
+
+  it('passes the owning profile in the body when archiving a session', async () => {
+    await setSessionArchived('sess-1', true, 'default')
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: { archived: true, profile: 'default' },
+        method: 'PATCH',
+        path: '/api/sessions/sess-1',
+        profile: 'default'
       })
     )
   })
