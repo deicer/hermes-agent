@@ -167,3 +167,7 @@ Every former god file is a **facade** (public entry points + the names other pac
 
 Long-form background: `website/docs/developer-guide/`. Workflow rules (PR/issue/review/salvage
 process) live in the `hermes-agent-dev` skill, not here.
+
+### Obsidian Project Sync
+
+After any change to code, infrastructure, configuration, or process, you MUST update the project in Obsidian — at minimum Проект.md and Лог работы.md for the relevant project.
